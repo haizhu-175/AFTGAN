@@ -145,7 +145,7 @@ def main():
     graph.test3_mask = test3_mask
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = GIN_Net2(in_len=2000, in_feature=13, gin_in_feature=256, num_layers=1, pool_size=3, cnn_hidden=1).to(device)
+    model = GIN_Net2(in_len=500, in_feature=13, gin_in_feature=256, num_layers=1, pool_size=3, cnn_hidden=1).to(device)
 
     model.load_state_dict(torch.load(args.gnn_model)['state_dict'])
 

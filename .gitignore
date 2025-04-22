@@ -1,0 +1,12 @@
+aftgnet/
+data/
+data1/
+data2/
+gkat_masks/
+model/
+model_gat_output/
+model_output/
+model_results/
+model_test_output/
+temp_index.json
+bfs_1

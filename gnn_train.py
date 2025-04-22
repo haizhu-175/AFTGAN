@@ -6,10 +6,11 @@ import numpy as np
 import argparse
 import torch
 import torch.nn as nn
-from torchsummary import  summary
+from torchsummary import summary
 
 from gnn_data import GNN_DATA
 from gnn_model import GIN_Net2
+from GKAT import GKATNet
 # from model import GIN_Net2
 from utils import Metrictor_PPI, print_file
 
@@ -50,11 +51,48 @@ parser.add_argument('--batch_size', default=None, type=int,
                     help="gnn train batch size, edge batch size")
 parser.add_argument('--epochs', default=None, type=int,
                     help='train epoch number')
+parser.add_argument('--use_gkat', action='store_true',
+                   help='使用GKAT替代GAT')
+parser.add_argument('--walk_length', type=int, default=4,
+                   help='GKAT的随机游走长度')
+parser.add_argument('--use_cached_masks', action='store_true',
+                   help='使用缓存的GKAT掩码')
+parser.add_argument('--mask_cache_path', type=str, default='./gkat_masks',
+                   help='GKAT掩码缓存路径')
 
 def train(model, graph, ppi_list, loss_fn, optimizer, device,
         result_file_path, summary_writer, save_path,
         batch_size=512, epochs=1000, scheduler=None, 
         got=False):
+    
+    # 极度减小批次大小
+    batch_size = min(batch_size, 32)  # 减小批次大小
+    
+    # 检查edge_index的有效性
+    max_node_idx = graph.x.size(0) - 1
+    edge_max = graph.edge_index.max().item()
+    if edge_max > max_node_idx:
+        print(f"Warning: edge_index contains indices ({edge_max}) larger than the number of nodes ({max_node_idx})")
+        print("Attempting to fix edge_index...")
+        valid_edges = (graph.edge_index[0] <= max_node_idx) & (graph.edge_index[1] <= max_node_idx)
+        graph.edge_index = graph.edge_index[:, valid_edges]
+        # 更新相关数据
+        if hasattr(graph, 'edge_attr_1'):
+            graph.edge_attr_1 = graph.edge_attr_1[valid_edges]
+        # 更新训练掩码
+        valid_train_mask = []
+        for i, idx in enumerate(graph.train_mask):
+            if idx < graph.edge_index.size(1):
+                valid_train_mask.append(idx)
+        graph.train_mask = valid_train_mask
+        print(f"Updated edge_index shape: {graph.edge_index.shape}")
+        print(f"Updated train_mask length: {len(graph.train_mask)}")
+    
+    # 强制使用CPU，避免GPU内存不足
+    device = torch.device('cpu')
+    model = model.to(device)
+    graph = graph.to(device)
+    loss_fn = loss_fn.to(device)
     
     global_step = 0
     global_best_valid_f1 = 0.0
@@ -63,6 +101,10 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
     truth_edge_num = graph.edge_index.shape[1] // 2
 
     for epoch in range(epochs):
+        # 添加内存清理
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
 
         recall_sum = 0.0
         precision_sum = 0.0
@@ -198,7 +240,17 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
                     .format(epoch, loss, recall, precision, f1, valid_loss, metrics.Recall, metrics.Precision, metrics.F1,metrics.auc,metrics.hmloss, global_best_valid_f1, global_best_valid_f1_epoch), save_file_path=result_file_path)
 
 def main():
+    import os  # 在函数内部再次导入os模块，确保可用
     args = parser.parse_args()
+
+    # 创建保存路径
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+
+    # 设置GKAT掩码缓存路径
+    if args.use_gkat and args.use_cached_masks:
+        if not os.path.exists(args.mask_cache_path):
+            os.makedirs(args.mask_cache_path, exist_ok=True)
 
     ppi_data = GNN_DATA(ppi_path=args.ppi_path)
 
@@ -215,8 +267,45 @@ def main():
     print("----------------------- Done split train and valid index -------------------")
 
     graph = ppi_data.data
-
-
+    print(f"Graph x shape: {graph.x.shape}")
+    
+    # 在这里定义 device 变量
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(device)
+    
+    # 获取实际维度
+    in_feature = 13  # 氨基酸向量维度固定为13
+    in_len = graph.x.shape[1]  # 序列长度
+    
+    # 修改模型初始化
+    model = GIN_Net2(
+        in_len=in_len,
+        in_feature=in_feature,  
+        gin_in_feature=256, 
+        num_layers=1, 
+        pool_size=3, 
+        cnn_hidden=1,
+        feature_fusion='mul',  # 显式设置feature_fusion
+        use_gkat=args.use_gkat,  # 传递使用GKAT的标志
+        walk_length=args.walk_length  # 传递walk_length
+    ).to(device)
+    
+    # 如果使用GKAT并需要缓存掩码
+    if args.use_gkat and hasattr(model, 'graph_layer') and hasattr(model.graph_layer, 'mask_generator'):
+        # 设置掩码生成器参数
+        model.graph_layer.mask_generator.walk_length = args.walk_length
+        model.graph_layer.mask_generator.use_cached = args.use_cached_masks
+        
+        if args.use_cached_masks:
+            import os
+            if not os.path.exists(args.mask_cache_path):
+                os.makedirs(args.mask_cache_path, exist_ok=True)
+            
+            # 设置掩码缓存路径
+            cache_file = os.path.join(args.mask_cache_path, f"gkat_masks_l{args.walk_length}.pt")
+            model.graph_layer.mask_generator.cache_path = cache_file
+            print(f"GKAT掩码将缓存于: {cache_file}")
+    
     ppi_list = ppi_data.ppi_list
     # print(ppi_list.shape)
     # print(ppi_list)
@@ -229,14 +318,6 @@ def main():
     graph.edge_index_got = torch.cat((graph.edge_index[:, graph.train_mask], graph.edge_index[:, graph.train_mask][[1, 0]]), dim=1)
     graph.edge_attr_got = torch.cat((graph.edge_attr_1[graph.train_mask], graph.edge_attr_1[graph.train_mask]), dim=0)
     graph.train_mask_got = [i for i in range(len(graph.train_mask))]
-
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(device)
-
-    graph.to(device)
-
-    model = GIN_Net2(in_len=2000, in_feature=13, gin_in_feature=256, num_layers=1, pool_size=3, cnn_hidden=1).to(device)
-
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=5e-4)
 

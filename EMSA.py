@@ -92,8 +92,8 @@ class EMSA(nn.Module):
 
 
 if __name__ == '__main__':
-    input=torch.randn(1609,13,2000)
-    emsa = EMSA(d_model=2000, d_k=512, d_v=512, h=13,H=13,W=1,ratio=2,apply_transform=True)
+    input=torch.randn(1609,13,500)
+    emsa = EMSA(d_model=500, d_k=512, d_v=512, h=13,H=13,W=1,ratio=2,apply_transform=True)
     output=emsa(input,input,input)
     print(output.shape)
 

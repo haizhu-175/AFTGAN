@@ -8,6 +8,7 @@ import random
 from EMSA import EMSA
 from ExternalAttention import  ExternalAttention
 from AFT import AFT_FULL
+from GKAT import GKATNet  # 导入正确的GKAT类
 
 
 from torch_geometric.nn import GINConv, JumpingKnowledge, global_mean_pool, SAGEConv,GATConv
@@ -28,135 +29,92 @@ class GATNet(torch.nn.Module):
         return x
 
 class GIN_Net2(torch.nn.Module):
-    def __init__(self, in_len=2000, in_feature=13, gin_in_feature=256, num_layers=1,
+    def __init__(self, in_len=500, in_feature=13, gin_in_feature=256, num_layers=1,
                  hidden=512, use_jk=False, pool_size=3, cnn_hidden=1, train_eps=True,
-                 feature_fusion=None, class_num=7):
+                 feature_fusion='mul', class_num=7, use_gkat=False, walk_length=4):
         super(GIN_Net2, self).__init__()
-        # self.emsa = ExternalAttention(d_model=2000,S=13)
-        self.alt_full = AFT_FULL(d_model=2000, n=13)
-        self.gat =GATNet(256,512,10)
-        self.use_jk = use_jk
-        self.train_eps = train_eps
-        self.feature_fusion = feature_fusion
-
+        self.alt_full = AFT_FULL(d_model=in_len, n=in_feature)
+        
+        # CNN处理部分
         self.conv1d = nn.Conv1d(in_channels=in_feature, out_channels=cnn_hidden, kernel_size=3, padding=0)
         self.bn1 = nn.BatchNorm1d(cnn_hidden)
-        self.biGRU = nn.GRU(cnn_hidden, cnn_hidden, bidirectional=True, batch_first=True, num_layers=1)
         self.maxpool1d = nn.MaxPool1d(pool_size, stride=pool_size)
-        self.global_avgpool1d = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(math.floor(in_len / pool_size), gin_in_feature)
-
-        self.gin_conv1 = GINConv(
-            nn.Sequential(
-                nn.Linear(gin_in_feature, hidden),
-                nn.ReLU(),
-                nn.Linear(hidden, hidden),
-                nn.ReLU(),
-                nn.BatchNorm1d(hidden),
-            ), train_eps=self.train_eps
-        )
-        self.gin_convs = torch.nn.ModuleList()
-        for i in range(num_layers - 1):
-            self.gin_convs.append(
-                GINConv(
-                    nn.Sequential(
-                        nn.Linear(hidden, hidden),
-                        nn.ReLU(),
-                        nn.Linear(hidden, hidden),
-                        nn.ReLU(),
-                        nn.BatchNorm1d(hidden),
-                    ), train_eps=self.train_eps
-                )
-            )
-        if self.use_jk:
-            mode = 'cat'
-            self.jump = JumpingKnowledge(mode)
-            self.lin1 = nn.Linear(num_layers * hidden, hidden)
+        self.fc1 = nn.Linear((in_len - 2) // pool_size, gin_in_feature)
+        
+        # 选择使用GKAT还是GAT
+        if use_gkat:
+            print(f"使用GKAT模块 (walk_length={walk_length})")
+            self.graph_layer = GKATNet(gin_in_feature, hidden, heads=8, dropout=0.6)
+            # 设置随机游走长度
+            self.graph_layer.mask_generator.walk_length = walk_length
         else:
-            self.lin1 = nn.Linear(hidden, hidden)
+            print("使用标准GAT模块")
+            self.graph_layer = GATNet(gin_in_feature, hidden, 10)
+            
+        # 后续处理层
+        self.lin1 = nn.Linear(hidden, hidden)
         self.lin2 = nn.Linear(hidden, hidden)
-        self.fc2 = nn.Linear(hidden, class_num)
-
-    def reset_parameters(self):
-
-        self.conv1d.reset_parameters()
-        self.fc1.reset_parameters()
-
-        self.gin_conv1.reset_parameters()
-        for gin_conv in self.gin_convs:
-            gin_conv.reset_parameters()
-
-        if self.use_jk:
-            self.jump.reset_parameters()
-        self.lin1.reset_parameters()
-        self.lin2.reset_parameters()
-
-        self.fc2.reset_parameters()
-
+        # 确保feature_fusion不为None
+        self.feature_fusion = 'mul' if feature_fusion is None else feature_fusion
+        # 根据融合方式决定输入维度
+        self.fc2 = nn.Linear(hidden if self.feature_fusion == 'mul' else hidden * 2, class_num)
+        
     def forward(self, x, edge_index, train_edge_id, p=0.5):
-        # y = torch.randn(5189, 2, 2000, 2000)
-        # y =
+        # 序列特征处理
         x = x.transpose(1, 2)
-        # print(x.shape)
-        x= self.alt_full(x)
-        # print(x.shape)
+        x = self.alt_full(x)
         x = self.conv1d(x)
-        # print(x.shape)
         x = self.bn1(x)
-        # print(x.shape)
         x = self.maxpool1d(x)
-        # print(x.shape)
-
-
-        #
-        # x = x.transpose(1, 2)
-        # # print(x.shape)
-        # x, _ = self.biGRU(x)
-        # # print(x.shape)
-        # x = self.global_avgpool1d(x)
-        # # print(x.shape)
-
-
-
+        
         x = x.squeeze()
-        # print(x.shape)
         x = self.fc1(x)
-        # print(x.shape)
-        # print(x.shape)
-        # print(edge_index.shape)
-        x=self.gat(x, edge_index)
-        #
-        # print(x.shape)
-        # print(x.shape)
-        # x = self.gin_conv1(x, edge_index)
-        # xs = [x]
-        # for conv in self.gin_convs:
-        #     x = conv(x, edge_index)
-        #     xs += [x]
-        #
-        # if self.use_jk:
-        #     x = self.jump(xs)
-
+        
+        # 安全检查：确保edge_index中的索引在有效范围内
+        max_index = edge_index.max().item()
+        if max_index >= x.size(0):
+            print(f"警告: edge_index中存在无效索引 ({max_index} >= {x.size(0)})")
+            # 过滤无效边
+            valid_mask = (edge_index[0] < x.size(0)) & (edge_index[1] < x.size(0))
+            edge_index = edge_index[:, valid_mask]
+            print(f"过滤后: edge_index.shape = {edge_index.shape}")
+            
+            # 检查并更新train_edge_id
+            if isinstance(train_edge_id, list) or isinstance(train_edge_id, (torch.Tensor, np.ndarray)):
+                valid_ids = []
+                for idx in train_edge_id if isinstance(train_edge_id, list) else train_edge_id.tolist():
+                    if idx < edge_index.shape[1]:
+                        valid_ids.append(idx)
+                if len(valid_ids) > 0:
+                    train_edge_id = valid_ids
+                else:
+                    train_edge_id = list(range(min(10, edge_index.shape[1])))
+        
+        # 图特征提取
+        x = self.graph_layer(x, edge_index)
+        
+        # 全连接层处理
         x = F.relu(self.lin1(x))
-        # print(x.shape)
         x = F.dropout(x, p=p, training=self.training)
-        # print(x.shape)
         x = self.lin2(x)
-        # print(x.shape)
-        # x  = torch.add(x, x_)
-
-        node_id = edge_index[:, train_edge_id]
-        x1 = x[node_id[0]]
-        # print("x1",x1.shape)
-        x2 = x[node_id[1]]
-        # print("x2",x2.shape)
-
-        if self.feature_fusion == 'concat':
-            x = torch.cat([x1, x2], dim=1)
+        
+        # 提取边特征
+        if edge_index.shape[1] > 0 and (isinstance(train_edge_id, list) and len(train_edge_id) > 0) or \
+           (isinstance(train_edge_id, torch.Tensor) and train_edge_id.numel() > 0):
+            node_id = edge_index[:, train_edge_id]
+            x1 = x[node_id[0]]
+            x2 = x[node_id[1]]
+            
+            # 特征融合
+            if self.feature_fusion == 'concat':
+                x = torch.cat([x1, x2], dim=1)
+            else:  # mul
+                x = torch.mul(x1, x2)
+                
+            x = self.fc2(x)
         else:
-            x = torch.mul(x1, x2)
-        # print(x.shape)
-        x = self.fc2(x)
-        # print(x.shape)
-
+            # 如果没有有效边，返回零张量
+            shape = [len(train_edge_id) if isinstance(train_edge_id, list) else train_edge_id.shape[0]]
+            x = torch.zeros(shape + [self.fc2.weight.shape[1]], device=x.device)
+        
         return x

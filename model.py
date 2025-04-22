@@ -11,16 +11,16 @@ from torch_geometric.nn import GINConv, JumpingKnowledge, global_mean_pool, SAGE
 
 
 class GIN_Net2(torch.nn.Module):
-    def __init__(self, in_len=2000, in_feature=13, gin_in_feature=256, num_layers=1,
+    def __init__(self, in_len=200, in_feature=13, gin_in_feature=256, num_layers=1,
                  hidden=512, use_jk=False, pool_size=3, cnn_hidden=1, train_eps=True,
                  feature_fusion=None, class_num=7):
         super(GIN_Net2, self).__init__()
         self.use_jk = use_jk
         self.train_eps = train_eps
         self.feature_fusion = feature_fusion
-        # self.alt_full = AFT_FULL(d_model=2000, n=13)
-        # self.exta = ExternalAttention(d_model=2000, S=8)
-        # self.ufoat = UFOAttention(d_model=2000, d_k=256, d_v=256, h=4)
+        # self.alt_full = AFT_FULL(d_model=500, n=13)
+        # self.exta = ExternalAttention(d_model=500, S=8)
+        # self.ufoat = UFOAttention(d_model=500, d_k=256, d_v=256, h=4)
 
         self.conv1d = nn.Conv1d(in_channels=in_feature, out_channels=cnn_hidden, kernel_size=3, padding=0)
         self.bn1 = nn.BatchNorm1d(cnn_hidden)

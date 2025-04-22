@@ -4,71 +4,108 @@ from torch import nn
 from torch.nn import init
 
 
-
 class AFT_FULL(nn.Module):
-
-    def __init__(self, d_model,n=49,simple=False):
-
+    def __init__(self, d_model, n=36, simple=True):
         super(AFT_FULL, self).__init__()
-        self.fc_q = nn.Linear(d_model, d_model)
-        self.fc_k = nn.Linear(d_model, d_model)
-        self.fc_v = nn.Linear(d_model,d_model)
-        if(simple):
-            self.position_biases=torch.zeros((n,n))
-        else:
-            self.position_biases=nn.Parameter(torch.ones((n,n)))
         self.d_model = d_model
-        self.n=n
-        self.sigmoid=nn.Sigmoid()
-
-        self.init_weights()
-
-
-    def init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                init.kaiming_normal_(m.weight, mode='fan_out')
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                init.normal_(m.weight, std=0.001)
-                if m.bias is not None:
-                    init.constant_(m.bias, 0)
-
+        self.n = n
+        self.simple = simple
+        # 推迟线性层的初始化，直到知道确切的输入尺寸
+        self.fc_q = None
+        self.fc_k = None
+        self.fc_v = None
+        self.position_biases = None
+        self.initialized = False
+        self.sigmoid = nn.Sigmoid()
+        
+    def _initialize_weights(self, actual_d_model, actual_n):
+        # 使用更安全的方式获取设备
+        import torch
+        device = torch.device('cpu')  # 默认使用CPU
+        
+        self.fc_q = nn.Linear(actual_d_model, actual_d_model).to(device)
+        self.fc_k = nn.Linear(actual_d_model, actual_d_model).to(device)
+        self.fc_v = nn.Linear(actual_d_model, actual_d_model).to(device)
+        
+        if self.simple:
+            self.position_biases = nn.Parameter(torch.zeros(actual_n, actual_n)).to(device)
+        else:
+            self.position_biases = nn.Parameter(torch.ones(actual_n, actual_n)).to(device)
+        
+        self.initialized = True
+        print(f"AFT initialized with dimensions: d_model={actual_d_model}, n={actual_n}")
+    
     def forward(self, input):
+        bs, n, dim = input.shape
+        
+        # 内存优化3：分块处理长序列
+        if n > self.n:
+            return self._forward_chunked(input)
+        return self._forward_original(input)
 
-        bs, n,dim = input.shape
+    def _forward_original(self, input):
+        bs, n, dim = input.shape
+        
+        # 如果尚未初始化或维度不匹配，则初始化权重
+        if not self.initialized:
+            self._initialize_weights(dim, n)
+        
+        # 确保输入和模型在同一设备上
+        device = input.device
+        if self.fc_q.weight.device != device:
+            self.fc_q = self.fc_q.to(device)
+            self.fc_k = self.fc_k.to(device)
+            self.fc_v = self.fc_v.to(device)
+            self.position_biases = self.position_biases.to(device)
+        
+        q = self.fc_q(input)
+        k = self.fc_k(input).view(1, bs, n, dim)
+        v = self.fc_v(input).view(1, bs, n, dim)
+        
+        # 确保position_biases尺寸正确
+        if n > self.position_biases.size(0):
+            old_biases = self.position_biases
+            new_biases = torch.zeros(n, n, device=input.device)
+            new_biases[:old_biases.size(0), :old_biases.size(1)] = old_biases
+            self.position_biases = nn.Parameter(new_biases)
+            print(f"Position biases resized to {n}x{n}")
+        
+        # 确保设备一致
+        position_biases = self.position_biases.to(input.device).view(n, 1, -1, 1)
+        
+        # 数值稳定性优化
+        max_val = torch.max(k + position_biases, dim=2, keepdim=True)[0]
+        exp_val = torch.exp(k + position_biases - max_val)
+        
+        numerator = torch.sum(exp_val * v, dim=2)
+        denominator = torch.sum(exp_val, dim=2)
+        
+        out = numerator / denominator
+        return self.sigmoid(q) * out.permute(1, 0, 2)
 
-        q = self.fc_q(input) #bs,n,dim
-        k = self.fc_k(input).view(1,bs,n,dim) #1,bs,n,dim
-        v = self.fc_v(input).view(1,bs,n,dim) #1,bs,n,dim
-
-        numerator=torch.sum(torch.exp(k+self.position_biases.view(n,1,-1,1))*v,dim=2) #n,bs,dim
-        denominator=torch.sum(torch.exp(k+self.position_biases.view(n,1,-1,1)),dim=2) #n,bs,dim
-
-        out=(numerator/denominator) #n,bs,dim
-        out=self.sigmoid(q)*(out.permute(1,0,2)) #bs,n,dim
-
-        return out
-
-
-if __name__ == '__main__':
-    # input=torch.randn(1609,1,666)
-    # aft_full = AFT_FULL(d_model=666, n=1)
-    # output=aft_full(input)
-    from torch.autograd import Variable
-
-    #
-    conv1 = nn.Conv1d(in_channels=1293, out_channels=1, kernel_size=3, padding=0)
-    maxpool1d = nn.MaxPool1d(3, stride=3)
-    input = torch.randn(1609,1293,2000)
-    output = conv1(input)
-    print(output.shape)
-    output = maxpool1d(output)
-    print(output.shape)
-
+    def _forward_chunked(self, input):
+        bs, n, dim = input.shape
+        q = self.fc_q(input)
+        
+        outputs = []
+        for i in range(0, n, self.n):
+            chunk = input[:, i:i+self.n, :]
+            k = self.fc_k(chunk).view(1, bs, -1, dim)
+            v = self.fc_v(chunk).view(1, bs, -1, dim)
+            
+            # 处理局部位置偏置
+            chunk_size = chunk.size(1)
+            bias = self.position_biases[i:i+chunk_size, i:i+chunk_size].to(input.device)
+            bias = bias.view(chunk_size, 1, -1, 1)
+            
+            max_val = torch.max(k + bias, dim=2, keepdim=True)[0]
+            exp_val = torch.exp(k + bias - max_val)
+            
+            numerator = torch.sum(exp_val * v, dim=2)
+            denominator = torch.sum(exp_val, dim=2)
+            outputs.append(numerator / denominator)
+        
+        out = torch.cat(outputs, dim=0).permute(1, 0, 2)
+        return self.sigmoid(q) * out
 
 
