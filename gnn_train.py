@@ -7,6 +7,7 @@ import argparse
 import torch
 import torch.nn as nn
 from torchsummary import summary
+from torch.amp import autocast, GradScaler
 
 from gnn_data import GNN_DATA
 from gnn_model import GIN_Net2
@@ -59,14 +60,36 @@ parser.add_argument('--use_cached_masks', action='store_true',
                    help='使用缓存的GKAT掩码')
 parser.add_argument('--mask_cache_path', type=str, default='./gkat_masks',
                    help='GKAT掩码缓存路径')
+parser.add_argument('--use_amp', action='store_true', help='使用自动混合精度训练')
+parser.add_argument('--grad_clip', type=float, default=1.0, help='梯度裁剪阈值')
+parser.add_argument('--accumulation_steps', type=int, default=1, help='梯度累积步数')
 
 def train(model, graph, ppi_list, loss_fn, optimizer, device,
         result_file_path, summary_writer, save_path,
         batch_size=512, epochs=1000, scheduler=None, 
-        got=False):
+        got=False, use_amp=False, grad_clip=1.0, accumulation_steps=1):
     
-    # 极度减小批次大小
-    batch_size = min(batch_size, 32)  # 减小批次大小
+    # 初始化梯度缩放器
+    scaler = GradScaler('cuda', enabled=use_amp)
+    
+    # 减小批次大小以适应GPU内存
+    batch_size = min(batch_size, 32)
+    
+    # 确保所有数据在正确的设备上
+    graph.x = graph.x.to(device)
+    graph.edge_index = graph.edge_index.to(device)
+    if hasattr(graph, 'edge_attr_1'):
+        graph.edge_attr_1 = graph.edge_attr_1.to(device)
+    if hasattr(graph, 'edge_attr_got'):
+        graph.edge_attr_got = graph.edge_attr_got.to(device)
+    
+    # 确保数据类型一致
+    graph.x = graph.x.to(torch.float32)
+    graph.edge_index = graph.edge_index.to(torch.long)
+    if hasattr(graph, 'edge_attr_1'):
+        graph.edge_attr_1 = graph.edge_attr_1.to(torch.float32)
+    if hasattr(graph, 'edge_attr_got'):
+        graph.edge_attr_got = graph.edge_attr_got.to(torch.float32)
     
     # 检查edge_index的有效性
     max_node_idx = graph.x.size(0) - 1
@@ -76,10 +99,8 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
         print("Attempting to fix edge_index...")
         valid_edges = (graph.edge_index[0] <= max_node_idx) & (graph.edge_index[1] <= max_node_idx)
         graph.edge_index = graph.edge_index[:, valid_edges]
-        # 更新相关数据
         if hasattr(graph, 'edge_attr_1'):
             graph.edge_attr_1 = graph.edge_attr_1[valid_edges]
-        # 更新训练掩码
         valid_train_mask = []
         for i, idx in enumerate(graph.train_mask):
             if idx < graph.edge_index.size(1):
@@ -88,36 +109,29 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
         print(f"Updated edge_index shape: {graph.edge_index.shape}")
         print(f"Updated train_mask length: {len(graph.train_mask)}")
     
-    # 强制使用CPU，避免GPU内存不足
-    device = torch.device('cpu')
-    model = model.to(device)
-    graph = graph.to(device)
-    loss_fn = loss_fn.to(device)
-    
     global_step = 0
     global_best_valid_f1 = 0.0
     global_best_valid_f1_epoch = 0
-
     truth_edge_num = graph.edge_index.shape[1] // 2
 
     for epoch in range(epochs):
-        # 添加内存清理
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache()
-
+        # 内存清理
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         recall_sum = 0.0
         precision_sum = 0.0
         f1_sum = 0.0
         loss_sum = 0.0
 
         steps = math.ceil(len(graph.train_mask) / batch_size)
-        print (steps)
+        print(f"Steps per epoch: {steps}")
 
         model.train()
-
         random.shuffle(graph.train_mask)
         random.shuffle(graph.train_mask_got)
+
+        optimizer.zero_grad()  # 在epoch开始时清零梯度
 
         for step in range(steps):
             if step == steps-1:
@@ -131,56 +145,73 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
                 else:
                     train_edge_id = graph.train_mask[step*batch_size : step*batch_size + batch_size]
             
-            if got:
-
-                output = model(graph.x, graph.edge_index_got, train_edge_id)
-                label = graph.edge_attr_got[train_edge_id]
+            # 确保train_edge_id是列表或张量
+            if isinstance(train_edge_id, list):
+                train_edge_id = torch.tensor(train_edge_id, device=device, dtype=torch.long)
             else:
-                output = model(graph.x, graph.edge_index, train_edge_id)
-                label = graph.edge_attr_1[train_edge_id]
+                train_edge_id = train_edge_id.to(device)
             
-            label = label.type(torch.FloatTensor).to(device)
+            # 使用自动混合精度
+            with autocast('cuda', enabled=use_amp):
+                if got:
+                    output = model(graph.x, graph.edge_index_got, train_edge_id)
+                    label = graph.edge_attr_got[train_edge_id]
+                else:
+                    output = model(graph.x, graph.edge_index, train_edge_id)
+                    label = graph.edge_attr_1[train_edge_id]
+                
+                label = label.type(torch.float32).to(device)
+                loss = loss_fn(output, label) / accumulation_steps  # 缩放损失
 
-            loss = loss_fn(output, label)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # 使用梯度缩放器进行反向传播
+            scaler.scale(loss).backward()
+            
+            if (step + 1) % accumulation_steps == 0:
+                # 梯度裁剪
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                
+                # 更新参数
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             m = nn.Sigmoid()
-            pre_result = (m(output) > 0.5).type(torch.FloatTensor).to(device)
+            pre_result = (m(output) > 0.5).type(torch.float32).to(device)
 
             metrics = Metrictor_PPI(pre_result.cpu().data, label.cpu().data)
-
             metrics.show_result()
 
             recall_sum += metrics.Recall
             precision_sum += metrics.Precision
             f1_sum += metrics.F1
-            loss_sum += loss.item()
+            loss_sum += loss.item() * accumulation_steps  # 恢复原始损失值
 
-            summary_writer.add_scalar('train/loss', loss.item(), global_step)
+            summary_writer.add_scalar('train/loss', loss.item() * accumulation_steps, global_step)
             summary_writer.add_scalar('train/precision', metrics.Precision, global_step)
             summary_writer.add_scalar('train/recall', metrics.Recall, global_step)
             summary_writer.add_scalar('train/F1', metrics.F1, global_step)
             summary_writer.add_scalar('train/auc', metrics.auc, global_step)
             summary_writer.add_scalar('train/hmloss', metrics.hmloss, global_step)
 
-
             global_step += 1
-            print_file("epoch: {}, step: {}, Train: label_loss: {}, precision: {}, recall: {}, f1: {}, auc: {}, hmloss: {}"
-                        .format(epoch, step, loss.item(), metrics.Precision, metrics.Recall, metrics.F1, metrics.auc, metrics.hmloss))
+            print_file(f"epoch: {epoch}, step: {step}, Train: label_loss: {loss.item() * accumulation_steps}, "
+                      f"precision: {metrics.Precision}, recall: {metrics.Recall}, f1: {metrics.F1}, "
+                      f"auc: {metrics.auc}, hmloss: {metrics.hmloss}")
         
-        torch.save({'epoch': epoch,
-                    'state_dict': model.state_dict()},
-                    os.path.join(save_path, 'gnn_model_train.ckpt'))
+        # 保存检查点
+        torch.save({
+            'epoch': epoch,
+            'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scaler': scaler.state_dict()
+        }, os.path.join(save_path, 'gnn_model_train.ckpt'))
         
         valid_pre_result_list = []
         valid_label_list = []
         valid_loss_sum = 0.0
 
         model.eval()
-
         valid_steps = math.ceil(len(graph.val_mask) / batch_size)
 
         with torch.no_grad():
@@ -190,15 +221,22 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
                 else:
                     valid_edge_id = graph.val_mask[step*batch_size : step*batch_size + batch_size]
                 
-                output = model(graph.x, graph.edge_index, valid_edge_id)
-                label = graph.edge_attr_1[valid_edge_id]
-                label = label.type(torch.FloatTensor).to(device)
-
-                loss = loss_fn(output, label)
+                # 确保valid_edge_id是列表或张量
+                if isinstance(valid_edge_id, list):
+                    valid_edge_id = torch.tensor(valid_edge_id, device=device, dtype=torch.long)
+                else:
+                    valid_edge_id = valid_edge_id.to(device)
+                
+                with autocast('cuda', enabled=use_amp):
+                    output = model(graph.x, graph.edge_index, valid_edge_id)
+                    label = graph.edge_attr_1[valid_edge_id]
+                    label = label.type(torch.float32).to(device)
+                    loss = loss_fn(output, label)
+                
                 valid_loss_sum += loss.item()
 
                 m = nn.Sigmoid()
-                pre_result = (m(output) > 0.5).type(torch.FloatTensor).to(device)
+                pre_result = (m(output) > 0.5).type(torch.float32).to(device)
 
                 valid_pre_result_list.append(pre_result.cpu().data)
                 valid_label_list.append(label.cpu().data)
@@ -207,27 +245,29 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
         valid_label_list = torch.cat(valid_label_list, dim=0)
 
         metrics = Metrictor_PPI(valid_pre_result_list, valid_label_list)
-
         metrics.show_result()
 
         recall = recall_sum / steps
         precision = precision_sum / steps
         f1 = f1_sum / steps
         loss = loss_sum / steps
-
         valid_loss = valid_loss_sum / valid_steps
 
-        if scheduler != None:
+        if scheduler is not None:
             scheduler.step(loss)
-            print_file("epoch: {}, now learning rate: {}".format(epoch, scheduler.optimizer.param_groups[0]['lr']), save_file_path=result_file_path)
+            print_file(f"epoch: {epoch}, now learning rate: {scheduler.optimizer.param_groups[0]['lr']}", 
+                      save_file_path=result_file_path)
         
         if global_best_valid_f1 < metrics.F1:
             global_best_valid_f1 = metrics.F1
             global_best_valid_f1_epoch = epoch
 
-            torch.save({'epoch': epoch, 
-                        'state_dict': model.state_dict()},
-                        os.path.join(save_path, 'gnn_model_valid_best.ckpt'))
+            torch.save({
+                'epoch': epoch,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scaler': scaler.state_dict()
+            }, os.path.join(save_path, 'gnn_model_valid_best.ckpt'))
         
         summary_writer.add_scalar('valid/precision', metrics.Precision, global_step)
         summary_writer.add_scalar('valid/recall', metrics.Recall, global_step)
@@ -236,8 +276,11 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
         summary_writer.add_scalar('valid/auc', metrics.auc, global_step)
         summary_writer.add_scalar('valid/hmloss', metrics.hmloss, global_step)
 
-        print_file("epoch: {}, Training_avg: label_loss: {}, recall: {}, precision: {}, F1: {}, Validation_avg: loss: {}, recall: {}, precision: {}, F1: {},auc: {},hmloss: {}, Best valid_f1: {}, in {} epoch"
-                    .format(epoch, loss, recall, precision, f1, valid_loss, metrics.Recall, metrics.Precision, metrics.F1,metrics.auc,metrics.hmloss, global_best_valid_f1, global_best_valid_f1_epoch), save_file_path=result_file_path)
+        print_file(f"epoch: {epoch}, Training_avg: label_loss: {loss}, recall: {recall}, precision: {precision}, "
+                  f"F1: {f1}, Validation_avg: loss: {valid_loss}, recall: {metrics.Recall}, "
+                  f"precision: {metrics.Precision}, F1: {metrics.F1}, auc: {metrics.auc}, "
+                  f"hmloss: {metrics.hmloss}, Best valid_f1: {global_best_valid_f1}, in {global_best_valid_f1_epoch} epoch",
+                  save_file_path=result_file_path)
 
 def main():
     import os  # 在函数内部再次导入os模块，确保可用
@@ -349,7 +392,9 @@ def main():
     train(model, graph, ppi_list, loss_fn, optimizer, device,
         result_file_path, summary_writer, save_path,
         batch_size=args.batch_size, epochs=args.epochs, scheduler=scheduler, 
-        got=args.graph_only_train)
+        got=args.graph_only_train,
+        use_amp=args.use_amp, grad_clip=args.grad_clip,
+        accumulation_steps=args.accumulation_steps)
     
     summary_writer.close()
 

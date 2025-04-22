@@ -3,11 +3,11 @@ import math
 import torch.nn as nn
 import torch.nn.functional as F
 import random
+import numpy as np
 
 
 from EMSA import EMSA
 from ExternalAttention import  ExternalAttention
-from AFT import AFT_FULL
 from GKAT import GKATNet  # 导入正确的GKAT类
 
 
@@ -33,9 +33,8 @@ class GIN_Net2(torch.nn.Module):
                  hidden=512, use_jk=False, pool_size=3, cnn_hidden=1, train_eps=True,
                  feature_fusion='mul', class_num=7, use_gkat=False, walk_length=4):
         super(GIN_Net2, self).__init__()
-        self.alt_full = AFT_FULL(d_model=in_len, n=in_feature)
         
-        # CNN处理部分
+        # 序列特征处理
         self.conv1d = nn.Conv1d(in_channels=in_feature, out_channels=cnn_hidden, kernel_size=3, padding=0)
         self.bn1 = nn.BatchNorm1d(cnn_hidden)
         self.maxpool1d = nn.MaxPool1d(pool_size, stride=pool_size)
@@ -60,9 +59,11 @@ class GIN_Net2(torch.nn.Module):
         self.fc2 = nn.Linear(hidden if self.feature_fusion == 'mul' else hidden * 2, class_num)
         
     def forward(self, x, edge_index, train_edge_id, p=0.5):
+        # 确保输入数据类型一致
+        x = x.to(torch.float32)
+        
         # 序列特征处理
         x = x.transpose(1, 2)
-        x = self.alt_full(x)
         x = self.conv1d(x)
         x = self.bn1(x)
         x = self.maxpool1d(x)
@@ -115,6 +116,6 @@ class GIN_Net2(torch.nn.Module):
         else:
             # 如果没有有效边，返回零张量
             shape = [len(train_edge_id) if isinstance(train_edge_id, list) else train_edge_id.shape[0]]
-            x = torch.zeros(shape + [self.fc2.weight.shape[1]], device=x.device)
+            x = torch.zeros(shape + [self.fc2.weight.shape[1]], device=x.device, dtype=torch.float32)
         
         return x

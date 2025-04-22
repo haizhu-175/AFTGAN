@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing, GATConv
 from torch.cuda.amp import autocast
-import torch.jit as jit
 from typing import Optional, Tuple
 
 class GKATLayer(MessagePassing):
@@ -28,7 +27,6 @@ class GKATLayer(MessagePassing):
         if self.use_cuda:
             self.cuda()
     
-    @jit.script_method
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, masking: Optional[torch.Tensor] = None) -> torch.Tensor:
         # 确保输入在正确的设备上
         if self.use_cuda:
@@ -36,6 +34,12 @@ class GKATLayer(MessagePassing):
             edge_index = edge_index.cuda()
             if masking is not None:
                 masking = masking.cuda()
+        
+        # 确保数据类型一致
+        x = x.to(torch.float32)
+        edge_index = edge_index.to(torch.long)
+        if masking is not None:
+            masking = masking.to(torch.float32)
         
         # 使用自动混合精度
         with autocast(enabled=self.use_cuda):
@@ -46,9 +50,12 @@ class GKATLayer(MessagePassing):
             out = self.propagate(edge_index, x=x, masking=masking)
             return out
     
-    @jit.script_method
     def message(self, x_i: torch.Tensor, x_j: torch.Tensor, index: torch.Tensor, 
                 masking: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # 确保数据类型一致
+        x_i = x_i.to(torch.float32)
+        x_j = x_j.to(torch.float32)
+        
         # 计算注意力系数
         alpha = F.leaky_relu((torch.cat([x_i, x_j], dim=-1) * self.att).sum(dim=-1), negative_slope=0.2)
         
@@ -63,7 +70,6 @@ class GKATLayer(MessagePassing):
         
         return x_j * alpha.unsqueeze(-1)
     
-    @jit.script_method
     def update(self, aggr_out: torch.Tensor) -> torch.Tensor:
         return aggr_out.mean(dim=1)
 
@@ -86,11 +92,15 @@ class SimpleGKATNet(nn.Module):
         if self.use_cuda:
             self.cuda()
     
-    @jit.script_method
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # 确保输入在正确的设备上
         if self.use_cuda:
             x = x.cuda()
             edge_index = edge_index.cuda()
+        
+        # 确保数据类型一致
+        x = x.to(torch.float32)
+        edge_index = edge_index.to(torch.long)
         
         with autocast(enabled=self.use_cuda):
             # 安全检查
@@ -125,10 +135,13 @@ class GKATMaskGenerator(nn.Module):
             except Exception as e:
                 print(f"Error loading masks from {cache_path}: {e}")
     
-    @jit.script_method
     def forward(self, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        # 确保输入在正确的设备上
         if self.use_cuda:
             edge_index = edge_index.cuda()
+        
+        # 确保数据类型一致
+        edge_index = edge_index.to(torch.long)
         
         with autocast(enabled=self.use_cuda):
             if self.use_cached:
@@ -139,14 +152,14 @@ class GKATMaskGenerator(nn.Module):
             # 使用稀疏矩阵操作
             adj = torch.sparse_coo_tensor(
                 edge_index,
-                torch.ones(edge_index.size(1), device=edge_index.device),
+                torch.ones(edge_index.size(1), device=edge_index.device, dtype=torch.float32),
                 (num_nodes, num_nodes)
             )
             
             # 添加自循环
             eye = torch.sparse_coo_tensor(
                 torch.arange(num_nodes, device=edge_index.device).repeat(2, 1),
-                torch.ones(num_nodes, device=edge_index.device),
+                torch.ones(num_nodes, device=edge_index.device, dtype=torch.float32),
                 (num_nodes, num_nodes)
             )
             
@@ -162,11 +175,12 @@ class GKATMaskGenerator(nn.Module):
             
             mask = (mask > 0).float()
             
+            # 缓存计算的掩码
             if self.use_cached and self.cache_path:
                 self.cached_masks[key] = mask
                 try:
                     torch.save(self.cached_masks, self.cache_path)
-                except:
-                    print(f"Failed to save masks to {self.cache_path}")
+                except Exception as e:
+                    print(f"Failed to save masks to {self.cache_path}: {e}")
             
             return mask

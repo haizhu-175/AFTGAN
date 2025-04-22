@@ -54,7 +54,11 @@ class EMSA(nn.Module):
                     init.constant_(m.bias, 0)
 
     def forward(self, queries, keys, values, attention_mask=None, attention_weights=None):
-
+        # 确保输入数据类型一致
+        queries = queries.float()
+        keys = keys.float()
+        values = values.float()
+        
         b_s, nq ,c = queries.shape
         nk = keys.shape[1]
 
@@ -92,9 +96,11 @@ class EMSA(nn.Module):
 
 
 if __name__ == '__main__':
-    input=torch.randn(1609,13,500)
-    emsa = EMSA(d_model=500, d_k=512, d_v=512, h=13,H=13,W=1,ratio=2,apply_transform=True)
-    output=emsa(input,input,input)
+    # 测试代码
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    input = torch.randn(1609, 13, 500, device=device)
+    emsa = EMSA(d_model=500, d_k=512, d_v=512, h=13, H=13, W=1, ratio=2, apply_transform=True).to(device)
+    output = emsa(input, input, input)
     print(output.shape)
 
     

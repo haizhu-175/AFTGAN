@@ -30,18 +30,25 @@ class ExternalAttention(nn.Module):
                     init.constant_(m.bias, 0)
 
     def forward(self, queries):
+        # 确保输入数据类型一致
+        queries = queries.float()
+        
+        # 计算注意力权重
         attn=self.mk(queries) #bs,n,S
         attn=self.softmax(attn) #bs,n,S
         attn=attn/torch.sum(attn,dim=2,keepdim=True) #bs,n,S
+        
+        # 计算输出
         out=self.mv(attn) #bs,n,d_model
-
         return out
 
 
 if __name__ == '__main__':
-    input=torch.randn(50,1,666)
-    ea = ExternalAttention(d_model=666,S=8)
-    output=ea(input)
+    # 测试代码
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    input = torch.randn(50, 1, 666, device=device)
+    ea = ExternalAttention(d_model=666,S=8).to(device)
+    output = ea(input)
     print(output.shape)
 
     

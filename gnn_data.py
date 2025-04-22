@@ -23,12 +23,10 @@ class GNN_DATA:
         self.ppi_path = ppi_path
         self.bigger_ppi_path = bigger_ppi_path
         self.max_len = max_len
-
-
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         name = 0
         ppi_name = 0
-        # maxlen = 0
         self.node_num = 0
         self.edge_num = 0
         if exclude_protein_path != None:
@@ -127,7 +125,6 @@ class GNN_DATA:
         for i in tqdm(range(ppi_num)):
             seq1_name = self.ppi_list[i][0]
             seq2_name = self.ppi_list[i][1]
-            # print(len(self.protein_name))
             self.ppi_list[i][0] = self.protein_name[seq1_name]
             self.ppi_list[i][1] = self.protein_name[seq2_name]
         
@@ -135,7 +132,6 @@ class GNN_DATA:
             for i in tqdm(range(ppi_num)):
                 temp_ppi = self.ppi_list[i][::-1]
                 temp_ppi_label = self.ppi_label_list[i]
-                # if temp_ppi not in self.ppi_list:
                 self.ppi_list.append(temp_ppi)
                 self.ppi_label_list.append(temp_ppi_label)
 
@@ -190,27 +186,16 @@ class GNN_DATA:
 
         for p_name in tqdm(self.pseq_dict.keys()):
             temp_seq = self.pseq_dict[p_name]
-            # print(p_name)
-            # print(temp_seq)
-            # print(1)
             temp_vec = []
             temp_esm = []
-            temp_seq_esm=self.embed_normal2(temp_seq)
-            temp_esm.append([p_name,temp_seq_esm])
-            # batch_labels, batch_strs, batch_tokens = self.batch_converter(temp_esm)
-            # results = self.esm_model(batch_tokens, repr_layers=[33], return_contacts=True)
-            # token_representations = results["representations"][33]
-            # token_representations = token_representations.detach().numpy()
+            temp_seq_esm = self.embed_normal2(temp_seq)
+            temp_esm.append([p_name, temp_seq_esm])
 
             for acid in temp_seq:
                 temp_vec.append(self.acid2vec[acid])
             temp_vec = np.array(temp_vec)
-
             temp_vec = self.embed_normal(temp_vec, self.dim)
-
-
             self.pvec_dict[p_name] = temp_vec
-            # self.pvec_esm[p_name] = token_representations
 
     def get_feature_origin(self, pseq_path, vec_path):
         self.get_protein_aac(pseq_path)
@@ -218,10 +203,8 @@ class GNN_DATA:
         self.vectorize(vec_path)
 
         self.protein_dict = {}
-        # self.esm_dict = {}
         for name in tqdm(self.protein_name.keys()):
             self.protein_dict[name] = self.pvec_dict[name]
-            # self.esm_dict[name] = self.pvec_esm[name]
 
     def get_connected_num(self):
         self.ufs = UnionFindSet(self.node_num)
@@ -238,32 +221,24 @@ class GNN_DATA:
         ppi_list = np.array(self.ppi_list)
         ppi_label_list = np.array(self.ppi_label_list)
 
-        self.edge_index = torch.tensor(ppi_list, dtype=torch.long)
-        self.edge_attr = torch.tensor(ppi_label_list, dtype=torch.long)
+        self.edge_index = torch.tensor(ppi_list, dtype=torch.long, device=self.device)
+        self.edge_attr = torch.tensor(ppi_label_list, dtype=torch.float32, device=self.device)
         self.x = []
-        # self.emb=[]
-
 
         i = 0
         for name in self.protein_name:
             assert self.protein_name[name] == i
-            # print(self.protein_name)
             i += 1
             self.x.append(self.protein_dict[name])
-            # self.emb.append(self.esm_dict[name])
 
-
-        # self.emb = np.array(self.emb)
         self.x = np.array(self.x)
-        self.x = torch.tensor(self.x, dtype=torch.float)
-        # print(self.x.shape)
-        # print(type(self.x))
-        # self.emb = torch.tensor(self.emb, dtype=torch.float)
-        # print(self.emb.shape)
-        # print(type(self.emb))
-        # print(self.x)
+        self.x = torch.tensor(self.x, dtype=torch.float32, device=self.device)
 
         self.data = Data(x=self.x, edge_index=self.edge_index.T, edge_attr_1=self.edge_attr)
+        
+        self.data.x = self.data.x.to(self.device)
+        self.data.edge_index = self.data.edge_index.to(self.device)
+        self.data.edge_attr_1 = self.data.edge_attr_1.to(self.device)
     
     def split_dataset(self, train_valid_index_path, test_size=0.2, random_new=False, mode='random'):
         if random_new:

@@ -10,3 +10,4 @@ model_results/
 model_test_output/
 temp_index.json
 bfs_1
+__pycache__/

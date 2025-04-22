@@ -1,29 +1,41 @@
 import os
 import numpy as np
 import random
+import torch
 from sklearn.metrics import hamming_loss
 from sklearn import metrics
 
 
 def print_file(str_, save_file_path=None):
     print(str_)
-    if save_file_path != None:
-        f = open(save_file_path, 'a')
-        print(str_, file=f)
+    if save_file_path is not None:
+        with open(save_file_path, 'a') as f:
+            print(str_, file=f)
 # def comuter_hammingloss(y_true,y_pred):
 #     y_hot = np.array(y_pred>0.5,dtype=float)
 #     HammingLoss =[]
 #     for i in range()
 class Metrictor_PPI:
     def __init__(self, pre_y, truth_y, is_binary=False):
-        # print("pre_y",pre_y)
-        # print("truth_y",truth_y)
+        # 确保输入是numpy数组
+        if isinstance(pre_y, torch.Tensor):
+            pre_y = pre_y.cpu().numpy()
+        if isinstance(truth_y, torch.Tensor):
+            truth_y = truth_y.cpu().numpy()
+            
         self.TP = 0
         self.FP = 0
         self.TN = 0
         self.FN = 0
-        self.auc = metrics.roc_auc_score(truth_y, pre_y)
-        self.hmloss =hamming_loss(truth_y,pre_y)
+        
+        # 添加异常处理
+        try:
+            self.auc = metrics.roc_auc_score(truth_y, pre_y)
+        except ValueError:
+            # 如果只有一个类别，将AUC设为0或其他默认值
+            self.auc = 0.0
+        
+        self.hmloss = hamming_loss(truth_y, pre_y)
 
         if is_binary:
             length = pre_y.shape[0]
@@ -38,7 +50,6 @@ class Metrictor_PPI:
                 elif pre_y[i] == 1:
                     self.FP += 1
             self.num = length
-
         else:
             N, C = pre_y.shape
             for i in range(N):
@@ -62,10 +73,10 @@ class Metrictor_PPI:
         self.F1 = 2 * self.Precision * self.Recall / (self.Precision + self.Recall + 1e-10)
 
         if is_print:
-            print_file("Accuracy: {}".format(self.Accuracy), file)
-            print_file("Precision: {}".format(self.Precision), file)
-            print_file("Recall: {}".format(self.Recall), file)
-            print_file("F1-Score: {}".format(self.F1), file)
+            print_file(f"Accuracy: {self.Accuracy:.4f}", file)
+            print_file(f"Precision: {self.Precision:.4f}", file)
+            print_file(f"Recall: {self.Recall:.4f}", file)
+            print_file(f"F1-Score: {self.F1:.4f}", file)
 
 class UnionFindSet(object):
     def __init__(self, m):
@@ -101,11 +112,12 @@ class UnionFindSet(object):
 
 
 def get_bfs_sub_graph(ppi_list, node_num, node_to_edge_index, sub_graph_size):
-
+    """使用BFS获取子图"""
     candiate_node = []
     selected_edge_index = []
     selected_node = []
 
+    # 随机选择一个起始节点
     random_node = random.randint(0, node_num - 1)
     while len(node_to_edge_index[random_node]) > 5:
         random_node = random.randint(0, node_num - 1)
@@ -115,7 +127,6 @@ def get_bfs_sub_graph(ppi_list, node_num, node_to_edge_index, sub_graph_size):
         cur_node = candiate_node.pop(0)
         selected_node.append(cur_node)
         for edge_index in node_to_edge_index[cur_node]:
-
             if edge_index not in selected_edge_index:
                 selected_edge_index.append(edge_index)
 
@@ -127,26 +138,23 @@ def get_bfs_sub_graph(ppi_list, node_num, node_to_edge_index, sub_graph_size):
 
                 if end_node not in selected_node and end_node not in candiate_node:
                     candiate_node.append(end_node)
-            else:
-                continue
-        # print(len(selected_edge_index), len(candiate_node))
+    
     node_list = candiate_node + selected_node
-    # print(len(node_list), len(selected_edge_index))
     return selected_edge_index
 
 def get_dfs_sub_graph(ppi_list, node_num, node_to_edge_index, sub_graph_size):
-    
+    """使用DFS获取子图"""
     stack = []
     selected_edge_index = []
     selected_node = []
 
+    # 随机选择一个起始节点
     random_node = random.randint(0, node_num - 1)
     while len(node_to_edge_index[random_node]) > 5:
         random_node = random.randint(0, node_num - 1)
     stack.append(random_node)
 
     while len(selected_edge_index) < sub_graph_size:
-        # print(len(selected_edge_index), len(stack), len(selected_node))
         cur_node = stack[-1]
         if cur_node in selected_node:
             flag = True
