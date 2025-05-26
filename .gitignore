@@ -11,3 +11,6 @@ model_test_output/
 temp_index.json
 bfs_1
 __pycache__/
+GKAT-main/
+.cursor/
+change-logs/

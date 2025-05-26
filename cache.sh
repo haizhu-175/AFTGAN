@@ -1,0 +1,17 @@
+python gnn_train.py \
+    --description="gkat_integration" \
+    --ppi_path=data/9606.protein.actions.all_connected.txt \
+    --pseq_path=data/protein.STRING_all_connected.sequences.dictionary.tsv \
+    --vec_path=data/vec5_CTC.txt \
+    --batch_size=64 \
+    --epochs=50 \
+    --split_new=True \
+    --split_mode=random \
+    --save_path=model_output \
+    --use_gkat \
+    --walk_length=4\
+    --use_amp \
+    --use_cached_masks \
+    --mask_cache_path ./gkat_masks \
+    --grad_clip 1.0 \
+    --accumulation_steps 2

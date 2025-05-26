@@ -8,7 +8,7 @@ import numpy as np
 
 from EMSA import EMSA
 from ExternalAttention import  ExternalAttention
-from GKAT import GKATNet  # 导入正确的GKAT类
+from GKAT import GKATNet, GKATConfig  # 添加GKATConfig导入
 
 
 from torch_geometric.nn import GINConv, JumpingKnowledge, global_mean_pool, SAGEConv,GATConv
@@ -31,7 +31,9 @@ class GATNet(torch.nn.Module):
 class GIN_Net2(torch.nn.Module):
     def __init__(self, in_len=500, in_feature=13, gin_in_feature=256, num_layers=1,
                  hidden=512, use_jk=False, pool_size=3, cnn_hidden=1, train_eps=True,
-                 feature_fusion='mul', class_num=7, use_gkat=False, walk_length=4):
+                 feature_fusion='mul', class_num=7, use_gkat=False, walk_length=4,
+                 gkat_heads=8, gkat_dropout=0.6, gkat_kernel_type='random_walk',
+                 gkat_alpha=0.1, gkat_beta=0.1, gkat_num_layers=2):
         super(GIN_Net2, self).__init__()
         
         # 序列特征处理
@@ -42,10 +44,20 @@ class GIN_Net2(torch.nn.Module):
         
         # 选择使用GKAT还是GAT
         if use_gkat:
-            print(f"使用GKAT模块 (walk_length={walk_length})")
-            self.graph_layer = GKATNet(gin_in_feature, hidden, heads=8, dropout=0.6)
-            # 设置随机游走长度
-            self.graph_layer.mask_generator.walk_length = walk_length
+            print(f"使用GKAT模块 (walk_length={walk_length}, kernel_type={gkat_kernel_type})")
+            gkat_config = GKATConfig(
+                in_channels=gin_in_feature,
+                out_channels=hidden,
+                heads=gkat_heads,
+                dropout=gkat_dropout,
+                walk_length=walk_length,
+                kernel_type=gkat_kernel_type,
+                alpha=gkat_alpha,
+                beta=gkat_beta,
+                use_cuda=torch.cuda.is_available(),
+                use_amp=True
+            )
+            self.graph_layer = GKATNet(gkat_config, num_layers=gkat_num_layers)
         else:
             print("使用标准GAT模块")
             self.graph_layer = GATNet(gin_in_feature, hidden, 10)
@@ -53,9 +65,7 @@ class GIN_Net2(torch.nn.Module):
         # 后续处理层
         self.lin1 = nn.Linear(hidden, hidden)
         self.lin2 = nn.Linear(hidden, hidden)
-        # 确保feature_fusion不为None
         self.feature_fusion = 'mul' if feature_fusion is None else feature_fusion
-        # 根据融合方式决定输入维度
         self.fc2 = nn.Linear(hidden if self.feature_fusion == 'mul' else hidden * 2, class_num)
         
     def forward(self, x, edge_index, train_edge_id, p=0.5):

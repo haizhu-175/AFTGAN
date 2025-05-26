@@ -747,16 +747,5 @@ python gnn_train.py \
     --mask_cache_path ./gkat_masks \
     --grad_clip 1.0 \
     --accumulation_steps 2
-
-python gnn_train.py \
-    --use_gkat \
-    
-    --walk_length 4 \
-    --use_cached_masks \
-    --mask_cache_path ./gkat_masks \
-    --grad_clip 1.0 \
-    --accumulation_steps 2 \
-    --batch_size 32 \
-    --epochs 1000
 ```
 

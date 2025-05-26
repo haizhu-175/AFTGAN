@@ -4,12 +4,9 @@ import numpy as np
 import copy
 import torch
 import random
-
-
 from tqdm import tqdm
-
+from torch_geometric.data import Data, Dataset, InMemoryDataset
 from utils import UnionFindSet, get_bfs_sub_graph, get_dfs_sub_graph
-from torch_geometric.data import Data, Dataset, InMemoryDataset, DataLoader
 
 class GNN_DATA:
     def __init__(self, ppi_path, exclude_protein_path=None, max_len=200, skip_head=True, p1_index=0, p2_index=1, label_index=2, graph_undirection=True, bigger_ppi_path=None):

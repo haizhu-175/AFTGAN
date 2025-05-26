@@ -56,6 +56,19 @@ parser.add_argument('--use_gkat', action='store_true',
                    help='使用GKAT替代GAT')
 parser.add_argument('--walk_length', type=int, default=4,
                    help='GKAT的随机游走长度')
+parser.add_argument('--gkat_heads', type=int, default=8,
+                   help='GKAT的注意力头数')
+parser.add_argument('--gkat_dropout', type=float, default=0.6,
+                   help='GKAT的Dropout率')
+parser.add_argument('--gkat_kernel_type', type=str, default='random_walk',
+                   choices=['random_walk', 'diffusion', 'p_step'],
+                   help='GKAT的图核类型')
+parser.add_argument('--gkat_alpha', type=float, default=0.1,
+                   help='GKAT扩散核的alpha参数')
+parser.add_argument('--gkat_beta', type=float, default=0.1,
+                   help='GKAT扩散核的beta参数')
+parser.add_argument('--gkat_num_layers', type=int, default=2,
+                   help='GKAT的层数')
 parser.add_argument('--use_cached_masks', action='store_true',
                    help='使用缓存的GKAT掩码')
 parser.add_argument('--mask_cache_path', type=str, default='./gkat_masks',
@@ -71,9 +84,6 @@ def train(model, graph, ppi_list, loss_fn, optimizer, device,
     
     # 初始化梯度缩放器
     scaler = GradScaler('cuda', enabled=use_amp)
-    
-    # 减小批次大小以适应GPU内存
-    batch_size = min(batch_size, 32)
     
     # 确保所有数据在正确的设备上
     graph.x = graph.x.to(device)
@@ -330,7 +340,13 @@ def main():
         cnn_hidden=1,
         feature_fusion='mul',  # 显式设置feature_fusion
         use_gkat=args.use_gkat,  # 传递使用GKAT的标志
-        walk_length=args.walk_length  # 传递walk_length
+        walk_length=args.walk_length,  # 传递walk_length
+        gkat_heads=args.gkat_heads,
+        gkat_dropout=args.gkat_dropout,
+        gkat_kernel_type=args.gkat_kernel_type,
+        gkat_alpha=args.gkat_alpha,
+        gkat_beta=args.gkat_beta,
+        gkat_num_layers=args.gkat_num_layers
     ).to(device)
     
     # 如果使用GKAT并需要缓存掩码
